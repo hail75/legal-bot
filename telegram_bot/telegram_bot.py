@@ -4,6 +4,7 @@ import mimetypes
 import os
 
 import aiohttp
+from telegram import Document
 from telegram import Update
 from telegram.ext import ApplicationBuilder
 from telegram.ext import CommandHandler
@@ -73,16 +74,8 @@ class TelegramBot:
             )
             return
 
-        if context.chat_data.get('processing_file', False):
-            await update.message.reply_text(
-                'Đang xử lý file. Vui lòng đợi một chút. 😡'
-            )
+        if await self._check_if_processing(update, context):
             return
-
-        if context.chat_data.get('processing_query', False):
-            await update.message.reply_text(
-                'Đang xử lý yêu cầu. Vui lòng đợi một chút. 😡'
-            )
 
         # Check for file extension
         file = update.message.document
@@ -97,28 +90,11 @@ class TelegramBot:
             )
             context.chat_data['processing_file'] = True
 
-            # Save the file locally
-            file_object = await self.app.bot.get_file(file.file_id)
-            file_path = os.path.join('uploaded', str(
-                update.effective_user.id), file.file_name)
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            await file_object.download_to_drive(file_path)
-
-            response = await self._send_file_to_rag_pipeline(
-                file.file_name, update.effective_user.id)
-            if response.get('status') != 'success':
-                await update.message.reply_text(
-                    'Có lỗi xảy ra khi trích xuất thông tin từ file. '
-                    'Vui lòng thử lại.'
-                )
-                context.chat_data['processing_file'] = False
-                return
-
-            await update.message.reply_text(
-                'Trích xuất thông tin thành công. '
-                'Từ bây giờ bạn có thể '
-                'hỏi, tra cứu thông tin hoặc yêu cầu tóm tắt, v.v.')
-            context.chat_data['files_received'] += 1
+            file_path = await self.save_file(file, update.effective_user.id)
+            await self._send_file_to_rag_pipeline(
+                file_path, update, context
+            )
+            os.remove(file_path)
             context.chat_data['processing_file'] = False
 
     async def text_handler(
@@ -131,10 +107,7 @@ class TelegramBot:
             )
             return
 
-        if context.chat_data.get('processing_file', False):
-            await update.message.reply_text(
-                'Đang xử lý file. Vui lòng đợi một chút. 😡'
-            )
+        if await self._check_if_processing(update, context):
             return
 
         if context.chat_data.get('files_received', 0) == 0:
@@ -143,19 +116,46 @@ class TelegramBot:
             )
             return
 
-        if context.chat_data.get('processing_query', False):
-            await update.message.reply_text(
-                'Đang xử lý yêu cầu. Vui lòng đợi một chút. 😡'
-            )
         # Process the text message
         query = update.message.text
         context.chat_data['processing_query'] = True
         await update.message.reply_text(
-            self._send_query_to_rag_pipeline(query, update.effective_user.id)
+            self._send_query_to_rag_pipeline(
+                query, update, context
+            )
         )
         context.chat_data['processing_query'] = False
 
-    async def _send_file_to_rag_pipeline(self, file_path: str, user_id: int):
+    async def _check_if_processing(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> bool:
+        """Check if the bot is processing a file or query."""
+        if context.chat_data.get('processing_file', False):
+            await update.message.reply_text(
+                'Đang xử lý file. Vui lòng đợi một chút. 😡'
+            )
+            return True
+        if context.chat_data.get('processing_query', False):
+            await update.message.reply_text(
+                'Đang xử lý yêu cầu. Vui lòng đợi một chút. 😡'
+            )
+            return True
+        return False
+
+    async def save_file(self, file: Document, user_id: int) -> str:
+        """Save the file locally."""
+        file_object = await self.app.bot.get_file(file.file_id)
+        file_path = os.path.join('uploaded', str(user_id), file.file_name)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        await file_object.download_to_drive(file_path)
+        return file_path
+
+    async def _send_file_to_rag_pipeline(
+        self,
+        file_path: str,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE
+    ):
         # TODO: Send POST request to RAG pipeline API
         async with aiohttp.ClientSession() as session:
             form = aiohttp.FormData()
@@ -168,19 +168,35 @@ class TelegramBot:
                 filename=file_name,
                 content_type=mime_type,
             )
-            form.add_field('user_id', str(user_id))
+            form.add_field('user_id', str(update.effective_user.id))
 
             async with session.post(
                 f'{self.rag_url}/insert_file',
                 data=form,
             ) as response:
-                response_json = await response.json()
-                os.remove(file_path)
-                return response_json
+                if response.status != 200:
+                    await update.message.reply_text(
+                        'Có lỗi xảy ra hehe. '
+                        'Vui lòng thử lại.'
+                    )
+                    return
+                await response.json()
+                await update.message.reply_text(
+                    'Trích xuất thông tin thành công từ',
+                    f'`{file_name}`. '
+                    'Giờ bạn có thể hỏi, '
+                    'tra cứu thông tin hoặc yêu cầu tóm tắt, v.v.'
+                )
+                context.chat_data['files_received'] += 1
 
-    def _send_query_to_rag_pipeline(self, query: str, user_id: int):
+    def _send_query_to_rag_pipeline(
+        self,
+        query: str,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE
+    ) -> str:
         # TODO
-        ...
+        return ''
 
 
 if __name__ == '__main__':

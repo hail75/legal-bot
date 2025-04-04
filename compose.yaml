@@ -3,11 +3,20 @@ services:
     build:
       context: ./rag_pipeline
     ports:
-    - 8000:8000
+    - 3964:8000
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     networks:
       - bot-tier
+    command:
+      [
+        "uvicorn",
+        "api:app",
+        "--host",
+        "0.0.0.0",
+        "--workers",
+        "1"
+      ]
 
   telegram_bot:
     build:
@@ -17,6 +26,11 @@ services:
       - RAG_PIPELINE_URL=http://rag_pipeline:8000
     networks:
       - bot-tier
+    command:
+      [
+        "python",
+        "telegram_bot.py",
+      ]
 
 networks:
   bot-tier:
