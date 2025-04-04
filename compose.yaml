@@ -1,0 +1,23 @@
+services:
+  rag_pipeline:
+    build:
+      context: ./rag_pipeline
+    ports:
+    - 8000:8000
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    networks:
+      - bot-tier
+
+  telegram_bot:
+    build:
+      context: ./telegram_bot
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - RAG_PIPELINE_URL=http://rag_pipeline:8000
+    networks:
+      - bot-tier
+
+networks:
+  bot-tier:
+    driver: bridge

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import mimetypes
 import os
 
+import aiohttp
 from telegram import Update
 from telegram.ext import ApplicationBuilder
 from telegram.ext import CommandHandler
@@ -11,10 +13,10 @@ from telegram.ext import MessageHandler
 
 
 class TelegramBot:
-    def __init__(self, token: str):
+    def __init__(self, token: str, rag_url: str):
         self.app = ApplicationBuilder().token(token).build()
+        self.rag_url = rag_url
         self._add_handlers()
-        self.run()
 
     def _add_handlers(self):
         """Add handlers to the application."""
@@ -22,7 +24,6 @@ class TelegramBot:
             CommandHandler(
                 'start',
                 self.start_handler,
-                ~filters.TEXT
             )
         )
         self.app.add_handler(
@@ -33,7 +34,7 @@ class TelegramBot:
         )
         self.app.add_handler(
             MessageHandler(
-                filters.TEXT & ~filters.Document.ALL,
+                filters.TEXT & ~filters.Document.ALL & ~filters.COMMAND,
                 self.text_handler,
             )
         )
@@ -57,7 +58,7 @@ class TelegramBot:
 
         user = update.effective_user
         context.chat_data['started'] = True
-        context.chat_data['received_file'] = False
+        context.chat_data['files_received'] = 0
         await update.message.reply_text(
             f'Xin chào {user.first_name}! Vui lòng upload file để tiếp tục.',
         )
@@ -72,6 +73,17 @@ class TelegramBot:
             )
             return
 
+        if context.chat_data.get('processing_file', False):
+            await update.message.reply_text(
+                'Đang xử lý file. Vui lòng đợi một chút. 😡'
+            )
+            return
+
+        if context.chat_data.get('processing_query', False):
+            await update.message.reply_text(
+                'Đang xử lý yêu cầu. Vui lòng đợi một chút. 😡'
+            )
+
         # Check for file extension
         file = update.message.document
         if not file.file_name.endswith('.docx'):
@@ -80,21 +92,33 @@ class TelegramBot:
             )
             return
         else:
-            context.chat_data['received_file'] = True
             await update.message.reply_text(
                 'File đã được nhận. Đang trích xuất thông tin từ file...'
             )
             context.chat_data['processing_file'] = True
-            # Save the file locally
-            file_path = os.path.join('uploaded', file.file_name)
-            await file.download(file_path)
 
-            self._send_file_to_rag_pipeline(
-                file_path, update.effective_user.id)
+            # Save the file locally
+            file_object = await self.app.bot.get_file(file.file_id)
+            file_path = os.path.join('uploaded', str(
+                update.effective_user.id), file.file_name)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            await file_object.download_to_drive(file_path)
+
+            response = await self._send_file_to_rag_pipeline(
+                file.file_name, update.effective_user.id)
+            if response.get('status') != 'success':
+                await update.message.reply_text(
+                    'Có lỗi xảy ra khi trích xuất thông tin từ file. '
+                    'Vui lòng thử lại.'
+                )
+                context.chat_data['processing_file'] = False
+                return
+
             await update.message.reply_text(
-                'Trích xuất thông tin thành công. \
-                Từ bây giờ bạn có thể \
-                hỏi, tra cứu thông tin hoặc yêu cầu tóm tắt, v.v.')
+                'Trích xuất thông tin thành công. '
+                'Từ bây giờ bạn có thể '
+                'hỏi, tra cứu thông tin hoặc yêu cầu tóm tắt, v.v.')
+            context.chat_data['files_received'] += 1
             context.chat_data['processing_file'] = False
 
     async def text_handler(
@@ -107,15 +131,15 @@ class TelegramBot:
             )
             return
 
-        if not context.chat_data.get('received_file', False):
-            await update.message.reply_text(
-                'Vui lòng upload file trước khi gửi tin nhắn.'
-            )
-            return
-
         if context.chat_data.get('processing_file', False):
             await update.message.reply_text(
                 'Đang xử lý file. Vui lòng đợi một chút. 😡'
+            )
+            return
+
+        if context.chat_data.get('files_received', 0) == 0:
+            await update.message.reply_text(
+                'Vui lòng upload file trước khi gửi tin nhắn.'
             )
             return
 
@@ -131,9 +155,37 @@ class TelegramBot:
         )
         context.chat_data['processing_query'] = False
 
-    def _send_file_to_rag_pipeline(self, file_path: str, user_id: int):
+    async def _send_file_to_rag_pipeline(self, file_path: str, user_id: int):
         # TODO: Send POST request to RAG pipeline API
-        ...
+        async with aiohttp.ClientSession() as session:
+            form = aiohttp.FormData()
+            file_name = os.path.basename(file_path)
+            mime_type, _ = mimetypes.guess_type(file_name)
+
+            form.add_field(
+                'file',
+                open(file_path, 'rb'),
+                filename=file_name,
+                content_type=mime_type,
+            )
+            form.add_field('user_id', str(user_id))
+
+            async with session.post(
+                f'{self.rag_url}/insert_file',
+                data=form,
+            ) as response:
+                response_json = await response.json()
+                os.remove(file_path)
+                return response_json
 
     def _send_query_to_rag_pipeline(self, query: str, user_id: int):
+        # TODO
         ...
+
+
+if __name__ == '__main__':
+    bot = TelegramBot(
+        token=os.environ['TELEGRAM_BOT_TOKEN'],
+        rag_url=os.environ['RAG_PIPELINE_URL'],
+    )
+    bot.run()
